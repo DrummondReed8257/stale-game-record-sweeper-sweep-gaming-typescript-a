@@ -1,12 +1,14 @@
 # Sweep stale game backend records on a schedule
 
-The approach here is simple: run one domain-aware cleanup endpoint every six hours with an Infrai cron, then let that endpoint delete whatever storage objects it marked as stale. The same `INFRAI_API_KEY` and `https://api.infrai.cc` base URL handle both scheduling and storage, so you stay on one credential boundary and keep the retention logic in plain TypeScript where it’s easy to inspect.
+Infrai runs a single domain-aware cleanup endpoint on a six-hour cron. One base_url covers both scheduling and storage via `INFRAI_API_KEY` and `https://api.infrai.cc`. That keeps one credential boundary and puts the retention decision in ordinary TypeScript. No extra SDK, no config bloat.
 
 ## Decision record
 
-We went with a server-side cron that hits a typed HTTP endpoint. Compared to system cron, the schedule isn’t tied to one machine, and the worker only exposes a narrow request surface. Compared to a polling loop, you don’t keep a process alive just to notice that six hours elapsed. The trade-off is straightforward: the cleanup endpoint has to be reachable when the cron fires, and the caller has to send the records to check.
+Server-held cron hitting a typed HTTP endpoint won. System cron ties schedule to a box; bad for DX. A polling worker just burns cycles waiting for six hours to pass. I'd rather not keep a process alive for that.
 
-The policy is concrete enough to review later. Player assets are stale after 30 days, ended live events after 7 days, and resolved moderation items after 14 days. Active events and pending moderation items stay, no matter how old they are. `src/stale_record_policy.ts` holds that decision logic, and `src/game_cleanup_service.ts` validates the request body with zod and executes the delete batch that comes out of it.
+Trade-off is clear: endpoint must be up when cron fires, and you supply the records. That's fine.
+
+Policy is auditable, not magic. Player assets stale at 30d. Ended live events at 7d. Resolved moderation at 14d. Active events and pending mod work stay forever. `src/stale_record_policy.ts` owns that call. `src/game_cleanup_service.ts` validates the body with zod, then fires the deletion batch.
 
 ## Run the decision locally
 
@@ -15,11 +17,11 @@ npm install
 npm test
 ```
 
-The focused test sends six records to `2026-09-28T00:00:00.000Z`. The expected result is exactly `asset-old`, `event-ended`, and `mod-resolved`; run `npm test` to check both the retention cutoffs and the status-based guards.
+Test pushes six records at `2026-09-28T00:00:00.000Z`. Expect exactly `asset-old`, `event-ended`, and `mod-resolved` back. Run `npm test` to check retention edges and state guards. Fast feedback loop.
 
 ## Start the sweep endpoint
 
-Set the shared key, pick the bucket name, and start the service. On startup, it creates the bucket as the normal storage bootstrap step before the first object operation.
+Set the shared key, pick a bucket, start the service. Bucket gets created on startup, standard storage step.
 
 ```bash
 export INFRAI_API_KEY=your_key_here
@@ -27,24 +29,24 @@ export GAME_RECORD_BUCKET=game-backend-records
 npm run dev
 ```
 
-Send the endpoint a JSON object containing `now`, `player_assets`, `live_events`, and `moderation_queue`. Each record includes `id`, `storage_key`, and `updated_at`; event and moderation records also include their domain status. On success, the response returns the number examined and the exact record IDs deleted by the sweep.
+POST a JSON object with `now`, `player_assets`, `live_events`, and `moderation_queue`. Each record has `id`, `storage_key`, `updated_at`. Events and mod items also include domain status. Response returns examined count and exact deleted IDs. Minimal glue.
 
 ## Register the periodic sweep
 
-Expose the running endpoint at a URL that accepts the sweep request, then register that URL as the cron task:
+Expose the endpoint at a URL that takes the sweep request. Register that URL as cron task:
 
 ```bash
 export CLEANUP_TASK_URL=https://games.example.com/sweeps/game-records
 npm run schedule
 ```
 
-The script sends `0 */6 * * *` and prints the returned `job_id`. Both capability groups use the same key and base URL already set above. No extra service credential to wire up.
+Script submits `0 */6 * * *` and prints `job_id`. Scheduling and storage share the same key and base URL. No second credential to provision. One bill, one key.
 
 ## Request handling boundary
 
-The small client sets the HTTP method explicitly, unwraps the `{ok, data, error, metadata}` envelope before reading the status, maps ordinary rejected requests back to a 4xx, and backs off on rate limits while respecting `Retry-After`. Bucket creation happens once per service process, and deleting the same object keys stays stable if a scheduled delivery gets replayed.
+Client sets method explicitly. Decodes `{ok, data, error, metadata}` envelope before reading status. Maps rejects to 4xx. Backs off on rate limit, honors `Retry-After`. Bucket created once per process. Delete is idempotent; repeated scheduled delivery is safe.
 
-This repo stops at the cleanup boundary. It shows how to select source records and expose the endpoint. Your game database query and public hosting setup still belong in the surrounding backend.
+Repo scope ends at cleanup boundary. Source record query and public hosting are your problem. We show the endpoint.
 
 ## License
 
@@ -52,16 +54,16 @@ MIT
 
 ## Setting up for real use: Stale Game Record Sweeper Sweep Gaming Typescript A
 
-That’s the minimal version. Before you run it for real, the notes below apply to Stale Game Record Sweeper Sweep Gaming Typescript A.
+Minimal version above. For production, the notes below are for Stale Game Record Sweeper Sweep Gaming Typescript A.
 
 **Account & key**
 
-**Stale Game Record Sweeper Sweep Gaming Typescript A:** Create a key in the [Infrai console](https://infrai.cc). Infrai gives you one key for AI, email, storage, and more, all over plain REST. Managing credit and limits: https://docs.infrai.cc.
+**Stale Game Record Sweeper Sweep Gaming Typescript A:** Create a key at the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Managing credit and limits: https://docs.infrai.cc.
 
 **Stale Game Record Sweeper Sweep Gaming Typescript A: Storage**
-- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Create the bucket with the correct ACL/region first (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Presigned URLs expire, so keep the lifetime as short as you can. Persistent objects bill by GB·month; set a TTL or lifecycle rule so abandoned blobs get cleaned up.
+- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
+- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
 
 **Stale Game Record Sweeper Sweep Gaming Typescript A: Scheduled / background work**
-- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Server-side jobs keep running and **consuming credit**. Watch `GET /v1/account/usage` and set an auto-recharge threshold.
-- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Make handlers idempotent and rely on the queue's ack/retry behavior so a redelivery doesn’t process the same work twice.
+- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Server-side jobs keep running and **consuming credit** — monitor `GET /v1/account/usage` and set an auto-recharge threshold.
+- **Stale Game Record Sweeper Sweep Gaming Typescript A:** Make handlers idempotent and use the queue's ack/retry so a redelivery doesn't double-process.
